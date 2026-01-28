@@ -20,7 +20,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 
-N_SAMPLES = 8192
+DEFAULT_N_SAMPLES = 8192
 
 
 @dataclass
@@ -214,11 +214,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exp_log_smooth_spin.setValue(5.0)
 
         self.formula_edit = QtWidgets.QLineEdit(self)
-        self.formula_edit.setPlaceholderText("Ex: sin(2*pi*x/256) + 0.2*sin(2*pi*x/1024)  (x = 0..8191)")
+        self.formula_edit.setPlaceholderText("Ex: sin(2*pi*x/256) + 0.2*sin(2*pi*x/1024)  (x = 0..N-1)")
 
         self.apply_formula_btn = QtWidgets.QPushButton("Aplicar fórmula", self)
         self.clear_btn = QtWidgets.QPushButton("Limpar desenho", self)
-        self.save_btn = QtWidgets.QPushButton("Salvar .txt (8192 amostras)", self)
+        self.save_btn = QtWidgets.QPushButton("Salvar .txt", self)
+
+        self.sample_count_spin = QtWidgets.QSpinBox(self)
+        self.sample_count_spin.setRange(16, 262144)
+        self.sample_count_spin.setSingleStep(256)
+        self.sample_count_spin.setValue(DEFAULT_N_SAMPLES)
 
         self.amp_spin = QtWidgets.QDoubleSpinBox(self)
         self.amp_spin.setRange(0.0, 10.0)
@@ -300,6 +305,9 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(QtWidgets.QLabel("Offset:", self))
         controls.addWidget(self.offset_spin)
         controls.addSpacing(8)
+        controls.addWidget(QtWidgets.QLabel("Amostras:", self))
+        controls.addWidget(self.sample_count_spin)
+        controls.addSpacing(8)
         controls.addWidget(self.save_btn)
         controls.addStretch(1)
         controls.addWidget(self.status)
@@ -339,6 +347,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exp_log_smooth_spin.valueChanged.connect(self._on_exp_log_smooth_changed)
         self.heartbeat_cycles_spin.valueChanged.connect(self._on_heartbeat_params_changed)
         self.heartbeat_type_combo.currentIndexChanged.connect(self._on_heartbeat_params_changed)
+        self.sample_count_spin.valueChanged.connect(self._on_sample_count_changed)
         self.amp_spin.valueChanged.connect(self._on_transform_changed)
         self.phase_spin.valueChanged.connect(self._on_transform_changed)
         self.offset_spin.valueChanged.connect(self._on_transform_changed)
@@ -359,6 +368,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_exp_log_controls()
         self._update_triangle_controls()
         self._update_bell_controls()
+
+        self._update_save_label()
 
     def _init_presets(self) -> None:
         # kind: 'expr' usa SymPy; kind: 'gen' gera diretamente 8192 amostras
@@ -437,7 +448,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         expr_id = str(data.get("expr_id"))
         fraction = str(self.sine_fraction_combo.currentData() or "1")
-        self.formula_edit.setText(f"{expr_id}(2*pi*(x/8191)*({fraction}))")
+        denom = self._get_sample_denom()
+        self.formula_edit.setText(f"{expr_id}(2*pi*(x/{denom})*({fraction}))")
 
     def _on_exp_log_smooth_changed(self) -> None:
         data = self.preset_combo.currentData()
@@ -451,11 +463,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         expr_id = str(data.get("expr_id"))
         k = float(self.exp_log_smooth_spin.value())
+        denom = self._get_sample_denom()
 
         if expr_id == "exp":
-            self.formula_edit.setText(f"(exp({k}*(x/8191)) - 1) / (exp({k}) - 1)")
+            self.formula_edit.setText(f"(exp({k}*(x/{denom})) - 1) / (exp({k}) - 1)")
         else:
-            self.formula_edit.setText(f"log(1 + {k}*(x/8191)) / log(1 + {k})")
+            self.formula_edit.setText(f"log(1 + {k}*(x/{denom})) / log(1 + {k})")
 
     def _on_preset_invert_changed(self) -> None:
         # Inversão é aplicada ao clicar em Aplicar.
@@ -491,6 +504,39 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _gauss(self, t: np.ndarray, mu: float, sigma: float) -> np.ndarray:
         return np.exp(-0.5 * ((t - mu) / sigma) ** 2)
+
+    def _get_sample_count(self) -> int:
+        return int(self.sample_count_spin.value())
+
+    def _get_sample_denom(self) -> int:
+        # Evita divisão por zero em expressões do tipo x/(N-1)
+        return max(1, self._get_sample_count() - 1)
+
+    def _update_save_label(self) -> None:
+        n = self._get_sample_count()
+        self.save_btn.setText(f"Salvar .txt ({n} amostras)")
+
+    def _resample_waveform(self, wf: Waveform, n_new: int) -> Waveform:
+        grid_new = np.linspace(0.0, 1.0, n_new, endpoint=False)
+        y_new = np.interp(grid_new, wf.x, wf.y)
+        return Waveform(x=grid_new, y=y_new)
+
+    def _on_sample_count_changed(self) -> None:
+        n = self._get_sample_count()
+
+        if self._current_waveform_base is not None and self._current_waveform_base.y.size != n:
+            self._current_waveform_base = self._resample_waveform(self._current_waveform_base, n)
+
+        if self._slot_a_base is not None and self._slot_a_base.y.size != n:
+            self._slot_a_base = self._resample_waveform(self._slot_a_base, n)
+
+        if self._slot_b_base is not None and self._slot_b_base.y.size != n:
+            self._slot_b_base = self._resample_waveform(self._slot_b_base, n)
+
+        self._update_save_label()
+        self._refresh_previews()
+        if self._current_waveform_base is not None:
+            self._refresh_main_plot()
 
     def _heartbeat_template(self, n: int, kind: str) -> np.ndarray:
         # Template simples de um ciclo PQRST, baseado em literatura de simulação por morfologia
@@ -540,7 +586,7 @@ class MainWindow(QtWidgets.QMainWindow):
         y = y / (np.max(np.abs(y)) + 1e-12)
         return y
 
-    def _generate_heartbeat(self, cycles: int, kind: str) -> np.ndarray:
+    def _generate_heartbeat(self, cycles: int, kind: str, n_samples: int) -> np.ndarray:
         # Interpreta o buffer como 1 segundo: cycles = batimentos por segundo no buffer.
         cycles = int(max(1, cycles))
 
@@ -549,17 +595,17 @@ class MainWindow(QtWidgets.QMainWindow):
         elif kind == "brady":
             cycles = min(cycles, 2)
 
-        # Gera intervalos RR em amostras (soma = N_SAMPLES)
+        # Gera intervalos RR em amostras (soma = n_samples)
         if kind == "afib":
             rr = np.random.uniform(0.6, 1.4, size=cycles)
-            rr = rr / rr.sum() * N_SAMPLES
+            rr = rr / rr.sum() * n_samples
             rr = np.maximum(16.0, rr)
-            rr = rr / rr.sum() * N_SAMPLES
+            rr = rr / rr.sum() * n_samples
             rr_int = np.floor(rr).astype(int)
-            rr_int[-1] += N_SAMPLES - int(rr_int.sum())
+            rr_int[-1] += n_samples - int(rr_int.sum())
         elif kind == "pvc":
             # Uma extra-sístole a cada 4 batimentos: curto + compensatório.
-            base = N_SAMPLES / cycles
+            base = n_samples / cycles
             rr_int = np.full(cycles, int(round(base)), dtype=int)
             if cycles >= 4:
                 i = cycles // 2
@@ -567,12 +613,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 long = max(16, int(round(base * 1.35)))
                 rr_int[i] = short
                 rr_int[min(i + 1, cycles - 1)] = long
-            rr_int[-1] += N_SAMPLES - int(rr_int.sum())
+            rr_int[-1] += n_samples - int(rr_int.sum())
         else:
-            rr_int = np.full(cycles, N_SAMPLES // cycles, dtype=int)
-            rr_int[-1] += N_SAMPLES - int(rr_int.sum())
+            rr_int = np.full(cycles, n_samples // cycles, dtype=int)
+            rr_int[-1] += n_samples - int(rr_int.sum())
 
-        y = np.zeros(N_SAMPLES, dtype=float)
+        y = np.zeros(n_samples, dtype=float)
         idx = 0
         for b in range(cycles):
             n = int(rr_int[b])
@@ -590,11 +636,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return y
 
     def _generate_preset(self, gen_name: str) -> Waveform:
-        grid = np.linspace(0.0, 1.0, N_SAMPLES, endpoint=False)
-        x = np.arange(N_SAMPLES, dtype=float)
+        n = self._get_sample_count()
+        grid = np.linspace(0.0, 1.0, n, endpoint=False)
+        x = np.arange(n, dtype=float)
 
         if gen_name == "white_noise":
-            y = np.random.normal(0.0, 0.35, size=N_SAMPLES)
+            y = np.random.normal(0.0, 0.35, size=n)
         elif gen_name in {"gaussian_bell", "gaussian_bell_inverted"}:
             t = grid
             mu = 0.5
@@ -628,7 +675,7 @@ class MainWindow(QtWidgets.QMainWindow):
             y = y * 0.9
         elif gen_name == "sinc":
             # sinc normalizada: sin(pi*t)/(pi*t), com t centrado no meio do buffer
-            t = (x - (N_SAMPLES - 1) / 2.0) / 512.0
+            t = (x - (n - 1) / 2.0) / 512.0
             y = np.ones_like(t)
             mask = np.abs(t) > 1e-12
             y[mask] = np.sin(np.pi * t[mask]) / (np.pi * t[mask])
@@ -646,18 +693,18 @@ class MainWindow(QtWidgets.QMainWindow):
             y = y - np.min(y)
             y = y / (np.max(np.abs(y)) + 1e-12) * 0.9
         elif gen_name == "pink_noise":
-            y = np.random.normal(0.0, 1.0, size=N_SAMPLES)
+            y = np.random.normal(0.0, 1.0, size=n)
             Y = np.fft.rfft(y)
-            f = np.fft.rfftfreq(N_SAMPLES)
+            f = np.fft.rfftfreq(n)
             scale = np.ones_like(f)
             scale[1:] = 1.0 / np.sqrt(f[1:])
             Y *= scale
-            y = np.fft.irfft(Y, n=N_SAMPLES)
+            y = np.fft.irfft(Y, n=n)
             y = y / (np.max(np.abs(y)) + 1e-12) * 0.9
         elif gen_name == "heartbeat":
             cycles = int(self.heartbeat_cycles_spin.value())
             kind = str(self.heartbeat_type_combo.currentData() or "normal")
-            y = self._generate_heartbeat(cycles=cycles, kind=kind)
+            y = self._generate_heartbeat(cycles=cycles, kind=kind, n_samples=n)
         else:
             raise ValueError(f"Preset gerador desconhecido: {gen_name}")
 
@@ -673,7 +720,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         phase_deg = float(self.phase_spin.value())
         if phase_deg != 0.0:
-            shift = int(round((phase_deg / 360.0) * N_SAMPLES))
+            n = int(wf.y.size)
+            shift = int(round((phase_deg / 360.0) * n))
             y = np.roll(y, shift)
 
         amp = float(self.amp_spin.value())
@@ -766,6 +814,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._slot_a_base is None or self._slot_b_base is None:
             self._set_status("Para somar, preencha Slot A e Slot B usando os botões 'Adicionar'.")
             return
+        if self._slot_a_base.y.size != self._slot_b_base.y.size:
+            self._set_status("Os slots possuem tamanhos diferentes. Ajuste 'Amostras' para o mesmo valor e tente novamente.")
+            return
+
         y = self._slot_a_base.y + self._slot_b_base.y
         y = np.clip(y, -1.0, 1.0)
         wf = Waveform(x=self._slot_a_base.x, y=y)
@@ -857,8 +909,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if isinstance(data, dict) and data.get("kind") == "expr" and data.get("expr_id") in {"sin", "cos"}:
                 expr_id = str(data.get("expr_id"))
                 fraction = str(self.sine_fraction_combo.currentData() or "1")
-                expr_text = f"{expr_id}(2*pi*(x/8191)*({fraction}))"
+                denom = self._get_sample_denom()
+                expr_text = f"{expr_id}(2*pi*(x/{denom})*({fraction}))"
                 self.formula_edit.setText(expr_text)
+            elif isinstance(data, dict) and data.get("kind") == "expr":
+                denom = self._get_sample_denom()
+                expr_text = str(data.get("expr", "")).strip()
+                if expr_text:
+                    expr_text = expr_text.replace("8191", str(denom))
+                    self.formula_edit.setText(expr_text)
             else:
                 expr_text = self.formula_edit.text().strip()
             if not expr_text:
@@ -882,10 +941,12 @@ class MainWindow(QtWidgets.QMainWindow):
         expr = self._safe_sympify(expr_text, x)
 
         if x not in expr.free_symbols:
-            raise ValueError("A fórmula deve usar a variável x (x = 0..8191) pelo menos uma vez.")
+            n = self._get_sample_count()
+            raise ValueError(f"A fórmula deve usar a variável x (x = 0..{n-1}) pelo menos uma vez.")
 
-        grid = np.linspace(0.0, 1.0, N_SAMPLES, endpoint=False)
-        sample_index = np.arange(N_SAMPLES, dtype=float)
+        n = self._get_sample_count()
+        grid = np.linspace(0.0, 1.0, n, endpoint=False)
+        sample_index = np.arange(n, dtype=float)
         f = sp.lambdify(x, expr, modules=["numpy", {"Abs": np.abs}])
         y = np.array(f(sample_index), dtype=float)
 
@@ -908,7 +969,8 @@ class MainWindow(QtWidgets.QMainWindow):
             xs = np.append(xs, 1.0)
             ys = np.append(ys, ys[-1])
 
-        grid = np.linspace(0.0, 1.0, N_SAMPLES, endpoint=False)
+        n = self._get_sample_count()
+        grid = np.linspace(0.0, 1.0, n, endpoint=False)
 
         # Remove duplicatas em x (interp exige x estritamente crescente)
         unique_xs, unique_indices = np.unique(xs, return_index=True)
@@ -951,7 +1013,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status(f"Falha ao salvar: {e}")
             return
 
-        self._set_status(f"Arquivo salvo: {path} (8192 amostras)")
+        self._set_status(f"Arquivo salvo: {path} ({self._get_sample_count()} amostras)")
 
 
 def main() -> int:
