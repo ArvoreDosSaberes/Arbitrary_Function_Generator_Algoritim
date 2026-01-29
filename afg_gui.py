@@ -174,6 +174,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_invert_check = QtWidgets.QCheckBox("Inverter sinal (preset)", self)
         self.preset_invert_check.setChecked(False)
 
+        self.sinever_reverse_sweep_check = QtWidgets.QCheckBox("Inverter varredura (SineVer)", self)
+        self.sinever_reverse_sweep_check.setChecked(False)
+
         self.sine_fraction_combo = QtWidgets.QComboBox(self)
         self.sine_fraction_combo.addItem("Ciclo completo (1/1)", "1")
         self.sine_fraction_combo.addItem("1/2", "1/2")
@@ -330,7 +333,11 @@ class MainWindow(QtWidgets.QMainWindow):
         controls = QtWidgets.QVBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Presets:", self))
         controls.addWidget(self.preset_combo)
-        controls.addWidget(self.preset_invert_check)
+
+        preset_checks_row = QtWidgets.QHBoxLayout()
+        preset_checks_row.addWidget(self.preset_invert_check)
+        preset_checks_row.addWidget(self.sinever_reverse_sweep_check)
+        controls.addLayout(preset_checks_row)
 
         self.sine_controls = QtWidgets.QGroupBox("Seno/Cosseno", self)
         sine_form = QtWidgets.QFormLayout(self.sine_controls)
@@ -434,6 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.formula_edit.textChanged.connect(self._on_formula_changed)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         self.preset_invert_check.stateChanged.connect(self._on_preset_invert_changed)
+        self.sinever_reverse_sweep_check.stateChanged.connect(self._on_preset_params_changed)
         self.sine_fraction_combo.currentIndexChanged.connect(self._on_sine_fraction_changed)
         self.triangle_opening_angle_spin.valueChanged.connect(self._on_preset_params_changed)
         self.bell_width_spin.valueChanged.connect(self._on_preset_params_changed)
@@ -477,6 +485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._on_formula_changed(self.formula_edit.text())
         self._update_heartbeat_controls()
         self._update_preset_invert_control()
+        self._update_sinever_reverse_sweep_control()
         self._update_sine_controls()
         self._update_exp_log_controls()
         self._update_triangle_controls()
@@ -509,7 +518,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.preset_combo.addItem("Quadrada", {"kind": "gen", "gen": "square"})
         self.preset_combo.addItem("Dente de serra", {"kind": "expr", "expr": "x/8191"})
-        self.preset_combo.addItem("Rampa", {"kind": "expr", "expr": "x/8191"})
         self.preset_combo.addItem("Triangular", {"kind": "gen", "gen": "triangular"})
         self.preset_combo.addItem("tri_up", {"kind": "gen", "gen": "tri_up"})
         self.preset_combo.addItem("tri_down", {"kind": "gen", "gen": "tri_down"})
@@ -518,7 +526,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_combo.addItem("StepResp", {"kind": "gen", "gen": "step_resp"})
 
         self.preset_combo.addItem("Sinc", {"kind": "gen", "gen": "sinc"})
-        self.preset_combo.addItem("Lorentz", {"kind": "gen", "gen": "lorenz"})
+        self.preset_combo.addItem("Lorentz", {"kind": "gen", "gen": "lorentz"})
 
         self.preset_combo.addItem("GaussianMonopulse", {"kind": "gen", "gen": "gaussian_monopulse"})
         self.preset_combo.addItem("GaussPulse", {"kind": "gen", "gen": "gauss_pulse"})
@@ -535,6 +543,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_combo.addItem("EOG", {"kind": "gen", "gen": "eog"})
         self.preset_combo.addItem("TV", {"kind": "gen", "gen": "tv"})
         self.preset_combo.addItem("VOICE", {"kind": "gen", "gen": "voice"})
+        
         self.preset_combo.addItem("SineVer", {"kind": "gen", "gen": "sine_ver"})
 
     def _update_heartbeat_controls(self) -> None:
@@ -546,6 +555,11 @@ class MainWindow(QtWidgets.QMainWindow):
         data = self.preset_combo.currentData()
         enabled = bool(isinstance(data, dict) and data.get("kind") in {"expr", "gen"})
         self.preset_invert_check.setEnabled(enabled)
+
+    def _update_sinever_reverse_sweep_control(self) -> None:
+        data = self.preset_combo.currentData()
+        enabled = bool(isinstance(data, dict) and data.get("kind") == "gen" and data.get("gen") == "sine_ver")
+        self.sinever_reverse_sweep_check.setEnabled(enabled)
 
     def _update_sine_controls(self) -> None:
         data = self.preset_combo.currentData()
@@ -635,6 +649,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._set_formula_text_programmatically(expr)
         self._update_heartbeat_controls()
         self._update_preset_invert_control()
+        self._update_sinever_reverse_sweep_control()
         self._update_sine_controls()
         self._update_exp_log_controls()
         self._update_triangle_controls()
@@ -849,10 +864,24 @@ class MainWindow(QtWidgets.QMainWindow):
             duty = float(self.square_duty_spin.value()) / 100.0
             duty = float(np.clip(duty, 1e-6, 1.0 - 1e-6))
 
-            rise_w = float(self.square_rise_time_spin.value())
-            fall_w = float(self.square_fall_time_spin.value())
-            rise_w = float(np.clip(rise_w, 0.0, 0.25))
-            fall_w = float(np.clip(fall_w, 0.0, 0.25))
+            rise_w_ui = float(self.square_rise_time_spin.value())
+            fall_w_ui = float(self.square_fall_time_spin.value())
+            max_edge_w = 0.25
+            rise_w_ui = float(np.clip(rise_w_ui, 0.0, max_edge_w))
+            fall_w_ui = float(np.clip(fall_w_ui, 0.0, max_edge_w))
+
+            inv_log_k = 60.0
+            inv_log_k = float(max(1e-6, inv_log_k))
+
+            def inv_log_width(w: float) -> float:
+                u = float(np.clip(w, 0.0, max_edge_w))
+                if max_edge_w <= 0.0:
+                    return 0.0
+                un = u / max_edge_w
+                return max_edge_w * (1.0 - (np.log1p(inv_log_k * (1.0 - un)) / np.log1p(inv_log_k)))
+
+            rise_w = inv_log_width(rise_w_ui)
+            fall_w = inv_log_width(fall_w_ui)
 
             bounce_amp = float(self.square_bounce_amp_spin.value())
             bounce_duration = float(self.square_bounce_duration_spin.value())
@@ -909,14 +938,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     u = dt[mask] / max(1e-12, bounce_duration)
                     # cos() inicia em 1.0: gera overshoot imediato (subida acima, descida abaixo)
                     ring = np.cos(2.0 * np.pi * edge_freq * u) * decay(u)
-                    y[mask] = base[mask] + direction * bounce_amp * ring
+                    y[mask] = y[mask] + direction * bounce_amp * ring
 
                 # Subida em t=0 (início do ciclo)
                 if rise_on:
-                    add_bounce(edge_t=0.0, direction=+1.0)
+                    add_bounce(edge_t=(0.0 + rise_w) % 1.0, direction=+1.0)
                 # Descida em t=duty
                 if fall_on:
-                    add_bounce(edge_t=duty, direction=-1.0)
+                    add_bounce(edge_t=(duty + fall_w) % 1.0, direction=-1.0)
 
             y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
         elif gen_name == "tri_up":
@@ -1055,7 +1084,10 @@ class MainWindow(QtWidgets.QMainWindow):
             t = grid
             f0 = 1.0
             f1 = 12.0
-            y = np.sin(2.0 * np.pi * (f0 + (f1 - f0) * t) * t)
+            if self.sinever_reverse_sweep_check.isChecked():
+                y = np.sin(2.0 * np.pi * (f1 - (f1 - f0) * t) * t)
+            else:
+                y = np.sin(2.0 * np.pi * (f0 + (f1 - f0) * t) * t)
             y = y / (np.max(np.abs(y)) + 1e-12) * 0.9
         elif gen_name in {"gaussian_bell", "gaussian_bell_inverted"}:
             t = grid
@@ -1096,8 +1128,8 @@ class MainWindow(QtWidgets.QMainWindow):
             y[mask] = np.sin(np.pi * t[mask]) / (np.pi * t[mask])
             y = y - np.mean(y)
             y = y / (np.max(np.abs(y)) + 1e-12) * 0.9
-        elif gen_name == "lorenz":
-            # Sistema de Lorenz (σ=10, ρ=28, β=8/3). Integração RK4 simples.
+        elif gen_name == "lorentz":
+            # Sistema de Lorentz (σ=10, ρ=28, β=8/3). Integração RK4 simples.
             omega0 = 0.0
             gamma = 0.18
             a = 1.0
